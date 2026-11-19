@@ -136,6 +136,7 @@ struct AnimoEditorApp {
     next_node_number: u64,
     current_path: Option<PathBuf>,
     saved_model: Model,
+    force_dirty: bool,
     pending_action: Option<PendingAction>,
     status: Option<String>,
 }
@@ -158,6 +159,7 @@ impl AnimoEditorApp {
             next_node_number: 1,
             current_path: None,
             saved_model: model,
+            force_dirty: false,
             pending_action: None,
             status: None,
         }
