@@ -1,0 +1,1 @@
+- Prefers crate directories under `crates/` to use short names without the project prefix (e.g. `core`, `render` rather than `animo-core`, `animo-render`). Confidence: 0.9

@@ -1,0 +1,177 @@
+#![forbid(unsafe_code)]
+
+use animo_core::Mesh;
+use std::fmt;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreviewPoint {
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreviewTriangle {
+    pub vertices: [PreviewPoint; 3],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreviewBounds {
+    pub min: PreviewPoint,
+    pub max: PreviewPoint,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MeshPreview {
+    pub triangles: Vec<PreviewTriangle>,
+    pub bounds: Option<PreviewBounds>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RenderError {
+    InvalidTriangleIndexCount(usize),
+    VertexIndexOutOfRange { index: u32, vertex_count: usize },
+    NonFiniteVertex,
+}
+
+impl fmt::Display for RenderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidTriangleIndexCount(count) => {
+                write!(f, "mesh index count {count} is not divisible by three")
+            }
+            Self::VertexIndexOutOfRange {
+                index,
+                vertex_count,
+            } => {
+                write!(f, "mesh index {index} exceeds vertex count {vertex_count}")
+            }
+            Self::NonFiniteVertex => f.write_str("mesh contains a non-finite vertex position"),
+        }
+    }
+}
+
+impl std::error::Error for RenderError {}
+
+impl MeshPreview {
+    pub fn from_mesh(mesh: &Mesh) -> Result<Self, RenderError> {
+        if mesh.indices.len() % 3 != 0 {
+            return Err(RenderError::InvalidTriangleIndexCount(mesh.indices.len()));
+        }
+        let mut min = PreviewPoint {
+            x: f32::INFINITY,
+            y: f32::INFINITY,
+        };
+        let mut max = PreviewPoint {
+            x: f32::NEG_INFINITY,
+            y: f32::NEG_INFINITY,
+        };
+        for vertex in &mesh.vertices {
+            let position = vertex.position;
+            if !position.x.is_finite() || !position.y.is_finite() {
+                return Err(RenderError::NonFiniteVertex);
+            }
+            min.x = min.x.min(position.x);
+            min.y = min.y.min(position.y);
+            max.x = max.x.max(position.x);
+            max.y = max.y.max(position.y);
+        }
+        let triangles = mesh
+            .indices
+            .chunks_exact(3)
+            .map(|indices| {
+                let vertices = indices
+                    .iter()
+                    .map(|index| {
+                        mesh.vertices
+                            .get(*index as usize)
+                            .map(|vertex| PreviewPoint {
+                                x: vertex.position.x,
+                                y: vertex.position.y,
+                            })
+                            .ok_or(RenderError::VertexIndexOutOfRange {
+                                index: *index,
+                                vertex_count: mesh.vertices.len(),
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(PreviewTriangle {
+                    vertices: [vertices[0], vertices[1], vertices[2]],
+                })
+            })
+            .collect::<Result<Vec<_>, RenderError>>()?;
+        let bounds = if mesh.vertices.is_empty() {
+            None
+        } else {
+            Some(PreviewBounds { min, max })
+        };
+        Ok(Self { triangles, bounds })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use animo_core::{MeshId, Vec2, Vertex};
+
+    fn triangle() -> Mesh {
+        Mesh {
+            id: MeshId::new(1),
+            vertices: vec![
+                Vertex {
+                    position: Vec2 { x: -1.0, y: -2.0 },
+                    uv: Vec2 { x: 0.0, y: 0.0 },
+                },
+                Vertex {
+                    position: Vec2 { x: 2.0, y: -2.0 },
+                    uv: Vec2 { x: 1.0, y: 0.0 },
+                },
+                Vertex {
+                    position: Vec2 { x: 0.0, y: 3.0 },
+                    uv: Vec2 { x: 0.5, y: 1.0 },
+                },
+            ],
+            indices: vec![0, 1, 2],
+        }
+    }
+
+    #[test]
+    fn converts_triangle_and_calculates_bounds() {
+        let preview = MeshPreview::from_mesh(&triangle()).unwrap();
+        assert_eq!(preview.triangles.len(), 1);
+        assert_eq!(
+            preview.bounds,
+            Some(PreviewBounds {
+                min: PreviewPoint { x: -1.0, y: -2.0 },
+                max: PreviewPoint { x: 2.0, y: 3.0 },
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_index_and_non_finite_position() {
+        let mut mesh = triangle();
+        mesh.indices[2] = 3;
+        assert!(matches!(
+            MeshPreview::from_mesh(&mesh),
+            Err(RenderError::VertexIndexOutOfRange { .. })
+        ));
+        let mut mesh = triangle();
+        mesh.vertices[0].position.x = f32::NAN;
+        assert_eq!(
+            MeshPreview::from_mesh(&mesh),
+            Err(RenderError::NonFiniteVertex)
+        );
+    }
+
+    #[test]
+    fn empty_mesh_has_no_bounds_or_triangles() {
+        let mesh = Mesh {
+            id: MeshId::new(1),
+            vertices: Vec::new(),
+            indices: Vec::new(),
+        };
+        let preview = MeshPreview::from_mesh(&mesh).unwrap();
+        assert!(preview.triangles.is_empty());
+        assert_eq!(preview.bounds, None);
+    }
+}

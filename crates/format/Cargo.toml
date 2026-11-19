@@ -1,0 +1,10 @@
+[package]
+name = "animo-format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+animo-core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
