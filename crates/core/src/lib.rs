@@ -76,6 +76,9 @@ pub struct Node {
     pub part: Option<PartId>,
     pub mesh: Option<MeshId>,
     pub texture: Option<TextureId>,
+    pub visible: bool,
+    pub opacity: f32,
+    pub draw_order: i32,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -252,6 +255,12 @@ impl Model {
             check_id(node.id.get())?;
             if node.name.trim().is_empty() {
                 return Err(CoreError::InvalidInput("node name cannot be empty".into()));
+            }
+            if !node.opacity.is_finite() || !(0.0..=1.0).contains(&node.opacity) {
+                return Err(CoreError::InvalidInput(format!(
+                    "node {} opacity must be between 0 and 1",
+                    node.id.get()
+                )));
             }
             if let Some(parent) = node.parent {
                 if !self.nodes.contains_key(&parent) {
@@ -919,6 +928,9 @@ mod tests {
                     part: None,
                     mesh: None,
                     texture: None,
+                    visible: true,
+                    opacity: 1.0,
+                    draw_order: 0,
                 }),
                 EditCommand::RemoveNode(NodeId::new(99)),
             ],
@@ -938,6 +950,9 @@ mod tests {
             part: None,
             mesh: None,
             texture: None,
+            visible: true,
+            opacity: 1.0,
+            draw_order: 0,
         });
         document.execute(transaction(0, vec![add])).unwrap();
         assert!(matches!(
@@ -1086,6 +1101,9 @@ mod tests {
                         part: None,
                         mesh: None,
                         texture: None,
+                        visible: true,
+                        opacity: 1.0,
+                        draw_order: 0,
                     }),
                 ],
             ))
@@ -1132,6 +1150,9 @@ mod tests {
                 part: None,
                 mesh: None,
                 texture: None,
+                visible: true,
+                opacity: 1.0,
+                draw_order: 0,
             },
         );
         model.nodes.insert(
@@ -1143,6 +1164,9 @@ mod tests {
                 part: None,
                 mesh: None,
                 texture: None,
+                visible: true,
+                opacity: 1.0,
+                draw_order: 0,
             },
         );
         assert!(model.validate().is_err());

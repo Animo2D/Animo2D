@@ -75,6 +75,9 @@ mod tests {
                         part: None,
                         mesh: None,
                         texture: None,
+                        visible: true,
+                        opacity: 1.0,
+                        draw_order: 0,
                     }),
                 ],
             })
@@ -126,6 +129,9 @@ mod tests {
                 part: None,
                 mesh: None,
                 texture: None,
+                visible: true,
+                opacity: 1.0,
+                draw_order: 0,
             })],
         };
         assert_eq!(session.execute(transaction).unwrap(), 1);

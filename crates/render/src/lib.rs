@@ -11,6 +11,7 @@ pub struct PreviewPoint {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PreviewTriangle {
+    pub indices: [u32; 3],
     pub vertices: [PreviewPoint; 3],
 }
 
@@ -95,6 +96,7 @@ impl MeshPreview {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(PreviewTriangle {
+                    indices: [indices[0], indices[1], indices[2]],
                     vertices: [vertices[0], vertices[1], vertices[2]],
                 })
             })

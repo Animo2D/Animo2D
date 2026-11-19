@@ -15,13 +15,14 @@ struct ViewTransform {
     center: Pos2,
     model_center: Vec2,
     scale: f32,
+    pan: Vec2,
 }
 
 impl ViewTransform {
-    fn fit(bounds: animo_render::PreviewBounds, canvas: Rect) -> Self {
+    fn fit(bounds: animo_render::PreviewBounds, canvas: Rect, zoom: f32, pan: Vec2) -> Self {
         let width = (bounds.max.x - bounds.min.x).max(0.001);
         let height = (bounds.max.y - bounds.min.y).max(0.001);
-        let scale = (canvas.width().max(1.0) / width)
+        let fit_scale = (canvas.width().max(1.0) / width)
             .min(canvas.height().max(1.0) / height)
             .min(500.0);
         Self {
@@ -30,22 +31,59 @@ impl ViewTransform {
                 x: (bounds.min.x + bounds.max.x) * 0.5,
                 y: (bounds.min.y + bounds.max.y) * 0.5,
             },
-            scale,
+            scale: fit_scale * zoom,
+            pan,
         }
     }
 
     fn to_screen(self, point: Vec2) -> Pos2 {
         Pos2::new(
-            self.center.x + (point.x - self.model_center.x) * self.scale,
-            self.center.y - (point.y - self.model_center.y) * self.scale,
+            self.center.x + self.pan.x + (point.x - self.model_center.x) * self.scale,
+            self.center.y + self.pan.y - (point.y - self.model_center.y) * self.scale,
         )
     }
 
     fn to_model(self, point: Pos2) -> Vec2 {
         Vec2 {
-            x: self.model_center.x + (point.x - self.center.x) / self.scale,
-            y: self.model_center.y - (point.y - self.center.y) / self.scale,
+            x: self.model_center.x + (point.x - self.center.x - self.pan.x) / self.scale,
+            y: self.model_center.y - (point.y - self.center.y - self.pan.y) / self.scale,
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ViewportCamera {
+    mesh: MeshId,
+    bounds: animo_render::PreviewBounds,
+    zoom: f32,
+    pan: Vec2,
+}
+
+impl ViewportCamera {
+    fn new(mesh: MeshId, bounds: animo_render::PreviewBounds) -> Self {
+        Self {
+            mesh,
+            bounds,
+            zoom: 1.0,
+            pan: Vec2 { x: 0.0, y: 0.0 },
+        }
+    }
+
+    fn transform(self, canvas: Rect) -> ViewTransform {
+        ViewTransform::fit(self.bounds, canvas, self.zoom, self.pan)
+    }
+
+    fn zoom_at(&mut self, canvas: Rect, pointer: Pos2, factor: f32) {
+        let before = self.transform(canvas).to_model(pointer);
+        self.zoom = (self.zoom * factor).clamp(0.1, 20.0);
+        let after = self.transform(canvas).to_screen(before);
+        self.pan.x += pointer.x - after.x;
+        self.pan.y += pointer.y - after.y;
+    }
+
+    fn pan_by(&mut self, delta: egui::Vec2) {
+        self.pan.x += delta.x;
+        self.pan.y += delta.y;
     }
 }
 
@@ -84,6 +122,8 @@ struct AnimoEditorApp {
     selected_node: Option<NodeId>,
     selected_vertex: Option<(MeshId, usize)>,
     vertex_drag: Option<VertexDrag>,
+    viewport_camera: Option<ViewportCamera>,
+    middle_pan_active: bool,
     next_node_number: u64,
     current_path: Option<PathBuf>,
     saved_model: Model,
@@ -99,6 +139,8 @@ impl AnimoEditorApp {
             selected_node: None,
             selected_vertex: None,
             vertex_drag: None,
+            viewport_camera: None,
+            middle_pan_active: false,
             next_node_number: 1,
             current_path: None,
             saved_model: model,
@@ -116,6 +158,8 @@ impl AnimoEditorApp {
         self.selected_node = None;
         self.selected_vertex = None;
         self.vertex_drag = None;
+        self.viewport_camera = None;
+        self.middle_pan_active = false;
         self.next_node_number = 1;
         self.current_path = path;
         self.saved_model = model;
@@ -154,6 +198,8 @@ impl AnimoEditorApp {
                     self.selected_node = None;
                     self.selected_vertex = None;
                     self.vertex_drag = None;
+                    self.viewport_camera = None;
+                    self.middle_pan_active = false;
                     self.next_node_number = 1;
                     self.current_path = Some(path);
                     self.saved_model = model;
@@ -217,6 +263,9 @@ impl AnimoEditorApp {
                 part: None,
                 mesh: None,
                 texture: None,
+                visible: true,
+                opacity: 1.0,
+                draw_order: 0,
             })],
         };
         match self.session.execute(transaction) {
@@ -312,6 +361,16 @@ impl AnimoEditorApp {
         }
     }
 
+    fn ensure_viewport_camera(&mut self, mesh: MeshId, bounds: animo_render::PreviewBounds) {
+        match &mut self.viewport_camera {
+            Some(camera) if camera.mesh == mesh => camera.bounds = bounds,
+            _ => {
+                self.viewport_camera = Some(ViewportCamera::new(mesh, bounds));
+                self.middle_pan_active = false;
+            }
+        }
+    }
+
     fn finish_vertex_drag(&mut self, drag: VertexDrag) {
         if drag.position == drag.original {
             return;
@@ -401,6 +460,7 @@ impl eframe::App for AnimoEditorApp {
             });
         });
         self.clear_removed_selection();
+        self.clear_invalid_vertex_selection();
 
         egui::SidePanel::left("hierarchy")
             .resizable(true)
@@ -430,6 +490,12 @@ impl eframe::App for AnimoEditorApp {
                         .selectable_label(selected, format!("{}  #{}", name, node_id.get()))
                         .clicked()
                     {
+                        if self.selected_node != Some(node_id) {
+                            self.selected_vertex = None;
+                            self.vertex_drag = None;
+                            self.viewport_camera = None;
+                            self.middle_pan_active = false;
+                        }
                         self.selected_node = Some(node_id);
                         self.status = None;
                     }
@@ -461,7 +527,16 @@ impl eframe::App for AnimoEditorApp {
                     .model()
                     .meshes
                     .get(&mesh_id)
-                    .map(|mesh| (mesh_id, MeshPreview::from_mesh(mesh)))
+                    .map(|mesh| {
+                        (
+                            mesh_id,
+                            MeshPreview::from_mesh(mesh),
+                            mesh.vertices
+                                .iter()
+                                .map(|vertex| vertex.position)
+                                .collect::<Vec<_>>(),
+                        )
+                    })
             });
 
         egui::SidePanel::right("inspector")
@@ -485,6 +560,20 @@ impl eframe::App for AnimoEditorApp {
                         "Texture: {}",
                         texture.map_or_else(|| "None".into(), |id| id.get().to_string())
                     ));
+                    if let Some((selected_mesh, vertex_index)) = self.selected_vertex
+                        && Some(selected_mesh) == *mesh
+                        && let Some((_, _, vertices)) = &selected_preview
+                        && let Some(position) = vertices.get(vertex_index)
+                    {
+                        let position = self
+                            .vertex_drag
+                            .filter(|drag| {
+                                drag.mesh == selected_mesh && drag.vertex_index == vertex_index
+                            })
+                            .map_or(*position, |drag| drag.position);
+                        ui.label(format!("Vertex {vertex_index}"));
+                        ui.label(format!("Position: {:.3}, {:.3}", position.x, position.y));
+                    }
                     ui.separator();
                     let button_text = if mesh.is_some() {
                         "Replace with triangle"
@@ -502,8 +591,10 @@ impl eframe::App for AnimoEditorApp {
                 }
             });
 
+        let mut finished_drag = None;
         egui::CentralPanel::default().show(context, |ui| {
             let available = ui.available_rect_before_wrap();
+            let response = ui.allocate_rect(available, egui::Sense::click_and_drag());
             let painter = ui.painter();
             painter.rect_filled(available, 4.0, Color32::from_gray(28));
             painter.rect_stroke(
@@ -513,72 +604,170 @@ impl eframe::App for AnimoEditorApp {
                 egui::StrokeKind::Inside,
             );
             let canvas = available.shrink(32.0);
-            match &selected_preview {
-                Some((_, Ok(preview))) if !preview.triangles.is_empty() => {
-                    if let Some(bounds) = preview.bounds {
-                        let width = (bounds.max.x - bounds.min.x).max(0.001);
-                        let height = (bounds.max.y - bounds.min.y).max(0.001);
-                        let scale = (canvas.width() / width)
-                            .min(canvas.height() / height)
-                            .min(500.0);
-                        let center = canvas.center();
-                        let model_center = egui::pos2(
-                            (bounds.min.x + bounds.max.x) * 0.5,
-                            (bounds.min.y + bounds.max.y) * 0.5,
-                        );
-                        let to_screen = |point: animo_render::PreviewPoint| {
-                            egui::pos2(
-                                center.x + (point.x - model_center.x) * scale,
-                                center.y - (point.y - model_center.y) * scale,
-                            )
-                        };
-                        for triangle in &preview.triangles {
-                            let points = triangle.vertices.map(to_screen);
-                            painter.add(egui::Shape::convex_polygon(
-                                points.to_vec(),
-                                Color32::from_rgba_unmultiplied(84, 145, 205, 120),
-                                Stroke::new(2.0_f32, Color32::from_rgb(135, 190, 245)),
-                            ));
+            if let Some((mesh_id, Ok(preview), vertices)) = &selected_preview {
+                if let Some(bounds) = preview.bounds {
+                    self.ensure_viewport_camera(*mesh_id, bounds);
+                    let (
+                        middle_pressed,
+                        middle_down,
+                        middle_released,
+                        pointer_delta,
+                        scroll,
+                        pointer,
+                    ) = ui.input(|input| {
+                        (
+                            input.pointer.button_pressed(egui::PointerButton::Middle),
+                            input.pointer.button_down(egui::PointerButton::Middle),
+                            input.pointer.button_released(egui::PointerButton::Middle),
+                            input.pointer.delta(),
+                            input.raw_scroll_delta,
+                            input.pointer.interact_pos(),
+                        )
+                    });
+                    if response.hovered() && middle_pressed && self.vertex_drag.is_none() {
+                        self.middle_pan_active = true;
+                    }
+                    if self.middle_pan_active {
+                        if middle_down
+                            && response.hovered()
+                            && let Some(camera) = &mut self.viewport_camera
+                        {
+                            camera.pan_by(pointer_delta);
+                        }
+                        if middle_released || !middle_down {
+                            self.middle_pan_active = false;
                         }
                     }
+                    if response.hovered()
+                        && !self.middle_pan_active
+                        && self.vertex_drag.is_none()
+                        && scroll.y != 0.0
+                        && let Some(pointer) = pointer
+                        && let Some(camera) = &mut self.viewport_camera
+                    {
+                        camera.zoom_at(canvas, pointer, (scroll.y * 0.002).exp());
+                    }
+                    let transform = self
+                        .viewport_camera
+                        .expect("camera initialized for selected mesh")
+                        .transform(canvas);
+                    let press_position = response
+                        .drag_started()
+                        .then(|| {
+                            ui.input(|input| input.pointer.press_origin())
+                                .or_else(|| response.interact_pointer_pos())
+                        })
+                        .flatten();
+                    if let Some(pointer) = press_position {
+                        let selected =
+                            nearest_vertex(vertices, transform, pointer, VERTEX_HIT_RADIUS);
+                        self.selected_vertex = selected.map(|index| (*mesh_id, index));
+                        self.vertex_drag = selected.map(|vertex_index| VertexDrag {
+                            mesh: *mesh_id,
+                            vertex_index,
+                            start_revision: self.session.revision(),
+                            original: vertices[vertex_index],
+                            position: vertices[vertex_index],
+                        });
+                    } else if response.clicked()
+                        && let Some(pointer) = response.interact_pointer_pos()
+                    {
+                        self.selected_vertex =
+                            nearest_vertex(vertices, transform, pointer, VERTEX_HIT_RADIUS)
+                                .map(|index| (*mesh_id, index));
+                    }
+                    if response.dragged()
+                        && let (Some(pointer), Some(drag)) =
+                            (response.interact_pointer_pos(), self.vertex_drag.as_mut())
+                        && drag.mesh == *mesh_id
+                    {
+                        drag.position = transform.to_model(pointer);
+                    }
+                    if response.drag_stopped() {
+                        finished_drag = self.vertex_drag.take();
+                    }
+
+                    let transient_drag = self.vertex_drag.filter(|drag| drag.mesh == *mesh_id);
+                    for triangle in &preview.triangles {
+                        let mut points = triangle.vertices.map(|point| {
+                            transform.to_screen(Vec2 {
+                                x: point.x,
+                                y: point.y,
+                            })
+                        });
+                        if let Some(drag) = transient_drag {
+                            for (point, vertex_index) in
+                                points.iter_mut().zip(triangle.indices.iter())
+                            {
+                                if *vertex_index as usize == drag.vertex_index {
+                                    *point = transform.to_screen(drag.position);
+                                }
+                            }
+                        }
+                        painter.add(egui::Shape::convex_polygon(
+                            points.to_vec(),
+                            Color32::from_rgba_unmultiplied(84, 145, 205, 120),
+                            Stroke::new(2.0_f32, Color32::from_rgb(135, 190, 245)),
+                        ));
+                    }
+                    for (vertex_index, position) in vertices.iter().enumerate() {
+                        let position = transient_drag
+                            .filter(|drag| drag.vertex_index == vertex_index)
+                            .map_or(*position, |drag| drag.position);
+                        let screen = transform.to_screen(position);
+                        let selected = self.selected_vertex == Some((*mesh_id, vertex_index));
+                        painter.circle_filled(
+                            screen,
+                            if selected { 6.0 } else { 4.0 },
+                            if selected {
+                                Color32::YELLOW
+                            } else {
+                                Color32::WHITE
+                            },
+                        );
+                        painter.circle_stroke(
+                            screen,
+                            if selected { 7.0 } else { 5.0 },
+                            Stroke::new(1.0_f32, Color32::from_gray(30)),
+                        );
+                    }
                 }
-                Some((_, Ok(_))) => {
-                    painter.text(
-                        available.center(),
-                        Align2::CENTER_CENTER,
-                        "Selected mesh has no triangles",
-                        FontId::proportional(16.0),
-                        Color32::LIGHT_GRAY,
-                    );
-                }
-                Some((_, Err(error))) => {
-                    painter.text(
-                        available.center(),
-                        Align2::CENTER_CENTER,
-                        error.to_string(),
-                        FontId::proportional(16.0),
-                        Color32::LIGHT_RED,
-                    );
-                }
-                None => {
-                    painter.text(
-                        available.center() - egui::vec2(0.0, 14.0),
-                        Align2::CENTER_CENTER,
-                        "Viewport",
-                        FontId::proportional(24.0),
-                        Color32::WHITE,
-                    );
-                    painter.text(
-                        available.center() + egui::vec2(0.0, 14.0),
-                        Align2::CENTER_CENTER,
-                        "Select a node with a mesh to preview it",
-                        FontId::proportional(16.0),
-                        Color32::LIGHT_GRAY,
-                    );
-                }
+            } else if let Some((_, Ok(_), _)) = &selected_preview {
+                painter.text(
+                    available.center(),
+                    Align2::CENTER_CENTER,
+                    "Selected mesh has no triangles",
+                    FontId::proportional(16.0),
+                    Color32::LIGHT_GRAY,
+                );
+            } else if let Some((_, Err(error), _)) = &selected_preview {
+                painter.text(
+                    available.center(),
+                    Align2::CENTER_CENTER,
+                    error.to_string(),
+                    FontId::proportional(16.0),
+                    Color32::LIGHT_RED,
+                );
+            } else {
+                painter.text(
+                    available.center() - egui::vec2(0.0, 14.0),
+                    Align2::CENTER_CENTER,
+                    "Viewport",
+                    FontId::proportional(24.0),
+                    Color32::WHITE,
+                );
+                painter.text(
+                    available.center() + egui::vec2(0.0, 14.0),
+                    Align2::CENTER_CENTER,
+                    "Select a node with a mesh to preview it",
+                    FontId::proportional(16.0),
+                    Color32::LIGHT_GRAY,
+                );
             }
-            ui.allocate_rect(available, egui::Sense::hover());
         });
+        if let Some(drag) = finished_drag {
+            self.finish_vertex_drag(drag);
+        }
 
         if let Some(action) = self.pending_action {
             egui::Window::new("Unsaved changes")
@@ -637,6 +826,95 @@ fn main() -> eframe::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn view_transform_round_trips_and_flips_screen_y() {
+        let transform = ViewTransform::fit(
+            animo_render::PreviewBounds {
+                min: animo_render::PreviewPoint { x: -2.0, y: -1.0 },
+                max: animo_render::PreviewPoint { x: 2.0, y: 1.0 },
+            },
+            Rect::from_min_max(Pos2::new(10.0, 20.0), Pos2::new(410.0, 220.0)),
+            1.0,
+            Vec2 { x: 0.0, y: 0.0 },
+        );
+        let point = Vec2 { x: 1.25, y: 0.5 };
+        let screen = transform.to_screen(point);
+        assert!(screen.y < transform.center.y);
+        let restored = transform.to_model(screen);
+        assert!((restored.x - point.x).abs() < 0.0001);
+        assert!((restored.y - point.y).abs() < 0.0001);
+    }
+
+    #[test]
+    fn nearest_vertex_uses_screen_space_tolerance() {
+        let transform = ViewTransform::fit(
+            animo_render::PreviewBounds {
+                min: animo_render::PreviewPoint { x: -1.0, y: -1.0 },
+                max: animo_render::PreviewPoint { x: 1.0, y: 1.0 },
+            },
+            Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(200.0, 200.0)),
+            1.0,
+            Vec2 { x: 0.0, y: 0.0 },
+        );
+        let vertices = [Vec2 { x: -1.0, y: 0.0 }, Vec2 { x: 1.0, y: 0.0 }];
+        let pointer = transform.to_screen(vertices[0]) + egui::vec2(4.0, 0.0);
+        assert_eq!(nearest_vertex(&vertices, transform, pointer, 8.0), Some(0));
+        assert_eq!(nearest_vertex(&vertices, transform, pointer, 3.0), None);
+    }
+
+    #[test]
+    fn degenerate_view_bounds_keep_a_finite_transform() {
+        let transform = ViewTransform::fit(
+            animo_render::PreviewBounds {
+                min: animo_render::PreviewPoint { x: 2.0, y: 3.0 },
+                max: animo_render::PreviewPoint { x: 2.0, y: 3.0 },
+            },
+            Rect::from_min_max(Pos2::new(10.0, 20.0), Pos2::new(10.0, 20.0)),
+            1.0,
+            Vec2 { x: 0.0, y: 0.0 },
+        );
+        let screen = transform.to_screen(Vec2 { x: 2.0, y: 3.0 });
+        assert!(screen.x.is_finite());
+        assert!(screen.y.is_finite());
+        assert_eq!(transform.to_model(screen), Vec2 { x: 2.0, y: 3.0 });
+    }
+
+    #[test]
+    fn zoom_keeps_the_pointer_anchor_fixed_and_clamps_scale() {
+        let bounds = animo_render::PreviewBounds {
+            min: animo_render::PreviewPoint { x: -2.0, y: -1.0 },
+            max: animo_render::PreviewPoint { x: 2.0, y: 1.0 },
+        };
+        let canvas = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(400.0, 300.0));
+        let pointer = Pos2::new(125.0, 86.0);
+        let mut camera = ViewportCamera::new(MeshId::new(1), bounds);
+        let anchored_model_point = camera.transform(canvas).to_model(pointer);
+        camera.zoom_at(canvas, pointer, 1.8);
+        let anchored_screen_point = camera.transform(canvas).to_screen(anchored_model_point);
+        assert!((anchored_screen_point.x - pointer.x).abs() < 0.0001);
+        assert!((anchored_screen_point.y - pointer.y).abs() < 0.0001);
+        camera.zoom_at(canvas, pointer, 1000.0);
+        assert_eq!(camera.zoom, 20.0);
+        camera.zoom_at(canvas, pointer, 0.00001);
+        assert_eq!(camera.zoom, 0.1);
+    }
+
+    #[test]
+    fn pan_offsets_the_model_and_camera_starts_fit_to_view() {
+        let bounds = animo_render::PreviewBounds {
+            min: animo_render::PreviewPoint { x: -1.0, y: -1.0 },
+            max: animo_render::PreviewPoint { x: 1.0, y: 1.0 },
+        };
+        let canvas = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(200.0, 200.0));
+        let mut camera = ViewportCamera::new(MeshId::new(4), bounds);
+        let origin = camera.transform(canvas).to_screen(Vec2 { x: 0.0, y: 0.0 });
+        camera.pan_by(egui::vec2(30.0, -12.0));
+        let panned = camera.transform(canvas).to_screen(Vec2 { x: 0.0, y: 0.0 });
+        assert_eq!(panned, origin + egui::vec2(30.0, -12.0));
+        assert_eq!(camera.zoom, 1.0);
+        assert_eq!(camera.pan, Vec2 { x: 30.0, y: -12.0 });
+    }
 
     #[test]
     fn save_snapshot_tracks_dirty_state_and_new_document_reset() {
