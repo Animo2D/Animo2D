@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{Cursor, Read};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub const FORMAT_VERSION: u32 = 2;
 
@@ -439,7 +439,10 @@ pub fn load_project(path: impl AsRef<Path>) -> Result<LoadedProject, FormatError
     Ok(LoadedProject { model, assets })
 }
 
-pub fn load_assets(model: &Model, root: impl AsRef<Path>) -> Result<Vec<ImportedAsset>, FormatError> {
+pub fn load_assets(
+    model: &Model,
+    root: impl AsRef<Path>,
+) -> Result<Vec<ImportedAsset>, FormatError> {
     model.validate().map_err(FormatError::InvalidModel)?;
     let root = root.as_ref();
     let mut assets = Vec::new();
@@ -471,7 +474,10 @@ pub fn save_project(
     let path = path.as_ref();
     let root = path.parent().unwrap_or_else(|| Path::new("."));
     let bytes = encode(model)?;
-    let in_memory: HashMap<_, _> = assets.iter().map(|asset| (asset.path.as_path(), asset)).collect();
+    let in_memory: HashMap<_, _> = assets
+        .iter()
+        .map(|asset| (asset.path.as_path(), asset))
+        .collect();
     let mut staged = Vec::new();
     for texture in model.textures.values() {
         let relative = safe_asset_path(&texture.path)?;
@@ -515,9 +521,9 @@ pub fn save_document(
 fn safe_asset_path(path: &str) -> Result<PathBuf, FormatError> {
     let path = Path::new(path);
     if path.as_os_str().is_empty()
-        || path.components().any(|component| {
-            !matches!(component, Component::Normal(_) | Component::CurDir)
-        })
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
     {
         return Err(FormatError::InvalidAssetPath(path.to_path_buf()));
     }

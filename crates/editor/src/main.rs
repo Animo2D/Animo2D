@@ -4,11 +4,12 @@ use animo_core::{
     EditCommand, EditTransaction, Mesh, MeshId, Model, ModelId, Node, NodeId, TextureId, Vec2,
     Vertex,
 };
-use animo_format::{ImportedAsset, ImportResult, LoadedProject};
+use animo_format::{ImportResult, ImportedAsset};
+use std::collections::HashMap;
 use animo_editor::EditorSession;
 use animo_render::MeshPreview;
 use eframe::egui::{self, Align, Align2, Color32, FontId, Layout, Pos2, Rect, RichText, Stroke};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const VERTEX_HIT_RADIUS: f32 = 9.0;
 
@@ -117,6 +118,7 @@ struct VertexDrag {
 enum PendingAction {
     New,
     Open,
+    ImportPsd,
 }
 
 struct AssetCache {
@@ -137,6 +139,7 @@ struct AnimoEditorApp {
     current_path: Option<PathBuf>,
     saved_model: Model,
     force_dirty: bool,
+    import_warnings: Vec<String>,
     pending_action: Option<PendingAction>,
     status: Option<String>,
 }
@@ -166,7 +169,7 @@ impl AnimoEditorApp {
     }
 
     fn is_dirty(&self) -> bool {
-        self.session.document().model() != &self.saved_model
+        self.force_dirty || self.session.document().model() != &self.saved_model
     }
 
     fn reset_session(&mut self, model: Model, path: Option<PathBuf>) {
@@ -184,6 +187,7 @@ impl AnimoEditorApp {
         self.next_node_number = 1;
         self.current_path = path;
         self.saved_model = model;
+        self.force_dirty = false;
         self.pending_action = None;
         self.status = None;
     }
@@ -202,6 +206,7 @@ impl AnimoEditorApp {
                 self.reset_session(Model::new(ModelId::new(1), "Untitled Model"), None);
             }
             PendingAction::Open => self.open_dialog(),
+            PendingAction::ImportPsd => self.import_psd_dialog(),
         }
     }
 
@@ -229,6 +234,7 @@ impl AnimoEditorApp {
                     self.next_node_number = 1;
                     self.current_path = Some(path);
                     self.saved_model = project.model;
+                    self.force_dirty = false;
                     self.pending_action = None;
                     self.status = None;
                 }
@@ -267,7 +273,8 @@ impl AnimoEditorApp {
                 self.middle_pan_active = false;
                 self.next_node_number = 1;
                 self.current_path = None;
-                self.saved_model = Model::new(ModelId::new(0), "Unsaved import");
+                self.saved_model = imported.model.clone();
+                self.force_dirty = true;
                 self.pending_action = None;
                 self.status = if imported.warnings.is_empty() {
                     Some("PSD imported; save the model to keep its assets".into())
@@ -301,10 +308,17 @@ impl AnimoEditorApp {
     }
 
     fn save_to(&mut self, path: PathBuf) -> bool {
-        match animo_format::save_document(&path, self.session.document()) {
+        match animo_format::save_document(
+            &path,
+            self.session.document(),
+            &self.asset_cache.assets,
+            self.asset_cache.source_root.as_deref(),
+        ) {
             Ok(()) => {
-                self.current_path = Some(path);
+                self.current_path = Some(path.clone());
+                self.asset_cache.source_root = path.parent().map(Path::to_path_buf);
                 self.saved_model = self.session.document().model().clone();
+                self.force_dirty = false;
                 self.status = None;
                 true
             }
@@ -431,6 +445,76 @@ impl AnimoEditorApp {
         }
     }
 
+    fn texture_handle(
+        &mut self,
+        context: &egui::Context,
+        texture_id: TextureId,
+    ) -> Result<egui::TextureHandle, String> {
+        if let Some(texture) = self.asset_cache.textures.get(&texture_id) {
+            return Ok(texture.clone());
+        }
+        let texture_ref = self
+            .session
+            .document()
+            .model()
+            .textures
+            .get(&texture_id)
+            .ok_or_else(|| format!("Texture {} was not found", texture_id.get()))?;
+        let bytes = if let Some(asset) = self
+            .asset_cache
+            .assets
+            .iter()
+            .find(|asset| asset.path == Path::new(&texture_ref.path))
+        {
+            asset.bytes.clone()
+        } else if let Some(root) = &self.asset_cache.source_root {
+            let relative = Path::new(&texture_ref.path);
+            if relative.is_absolute()
+                || relative
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_)))
+            {
+                return Err(format!("Unsafe texture path: {}", texture_ref.path));
+            }
+            std::fs::read(root.join(relative)).map_err(|error| error.to_string())?
+        } else {
+            return Err(format!("Texture asset is not loaded: {}", texture_ref.path));
+        };
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+        let mut reader = decoder.read_info().map_err(|error| error.to_string())?;
+        let mut buffer = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buffer).map_err(|error| error.to_string())?;
+        let pixels = &buffer[..info.buffer_size()];
+        let rgba = match info.color_type {
+            png::ColorType::Rgba => pixels.to_vec(),
+            png::ColorType::Rgb => pixels
+                .chunks_exact(3)
+                .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
+                .collect(),
+            png::ColorType::GrayscaleAlpha => pixels
+                .chunks_exact(2)
+                .flat_map(|pixel| [pixel[0], pixel[0], pixel[0], pixel[1]])
+                .collect(),
+            png::ColorType::Grayscale => pixels
+                .iter()
+                .flat_map(|pixel| [*pixel, *pixel, *pixel, 255])
+                .collect(),
+            png::ColorType::Indexed => return Err("Indexed PNG was not expanded".into()),
+        };
+        let image = egui::ColorImage::from_rgba_unmultiplied(
+            [info.width as usize, info.height as usize],
+            &rgba,
+        );
+        let texture = context.load_texture(
+            texture_ref.path.clone(),
+            image,
+            egui::TextureOptions::LINEAR,
+        );
+        self.asset_cache.textures.insert(texture_id, texture.clone());
+        Ok(texture)
+    }
+
     fn ensure_viewport_camera(&mut self, mesh: MeshId, bounds: animo_render::PreviewBounds) {
         match &mut self.viewport_camera {
             Some(camera) if camera.mesh == mesh => camera.bounds = bounds,
@@ -475,6 +559,56 @@ impl AnimoEditorApp {
     }
 }
 
+fn combined_bounds(
+    layers: &[(
+        animo_render::TexturedDrawRecord,
+        Mesh,
+        MeshPreview,
+        egui::TextureHandle,
+    )],
+) -> Option<animo_render::PreviewBounds> {
+    let mut bounds: Option<animo_render::PreviewBounds> = None;
+    for (_, _, preview, _) in layers {
+        let Some(layer_bounds) = preview.bounds else {
+            continue;
+        };
+        bounds = Some(match bounds {
+            Some(mut bounds) => {
+                bounds.min.x = bounds.min.x.min(layer_bounds.min.x);
+                bounds.min.y = bounds.min.y.min(layer_bounds.min.y);
+                bounds.max.x = bounds.max.x.max(layer_bounds.max.x);
+                bounds.max.y = bounds.max.y.max(layer_bounds.max.y);
+                bounds
+            }
+            None => layer_bounds,
+        });
+    }
+    bounds
+}
+
+fn hierarchy_row(
+    ui: &mut egui::Ui,
+    nodes: &[(NodeId, String, Option<NodeId>, i32, bool)],
+    node_id: NodeId,
+    depth: usize,
+    selected: Option<NodeId>,
+) -> Option<NodeId> {
+    let (_, name, _, _, visible) = nodes.iter().find(|node| node.0 == node_id)?;
+    let label = format!("{}{}  #{}", "  ".repeat(depth), name, node_id.get());
+    let response = ui.add_enabled(*visible, egui::SelectableLabel::new(selected == Some(node_id), label));
+    let mut clicked = response.clicked().then_some(node_id);
+    let mut children: Vec<_> = nodes
+        .iter()
+        .filter(|node| node.2 == Some(node_id))
+        .map(|node| node.0)
+        .collect();
+    children.sort_by_key(|child| nodes.iter().find(|node| node.0 == *child).map(|node| node.3));
+    for child in children {
+        clicked = hierarchy_row(ui, nodes, child, depth + 1, selected).or(clicked);
+    }
+    clicked
+}
+
 impl eframe::App for AnimoEditorApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("toolbar").show(context, |ui| {
@@ -487,6 +621,10 @@ impl eframe::App for AnimoEditorApp {
                     if ui.button("Open...").clicked() {
                         ui.close_menu();
                         self.request_action(PendingAction::Open);
+                    }
+                    if ui.button("Import PSD...").clicked() {
+                        ui.close_menu();
+                        self.request_action(PendingAction::ImportPsd);
                     }
                     ui.separator();
                     if ui.button("Save").clicked() {
@@ -532,6 +670,14 @@ impl eframe::App for AnimoEditorApp {
         self.clear_removed_selection();
         self.clear_invalid_vertex_selection();
 
+        let hierarchy_nodes: Vec<_> = self
+            .session
+            .document()
+            .model()
+            .nodes
+            .values()
+            .map(|node| (node.id, node.name.clone(), node.parent, node.draw_order, node.visible))
+            .collect();
         egui::SidePanel::left("hierarchy")
             .resizable(true)
             .default_width(210.0)
@@ -543,31 +689,26 @@ impl eframe::App for AnimoEditorApp {
                     }
                 });
                 ui.separator();
-                let nodes: Vec<_> = self
-                    .session
-                    .document()
-                    .model()
-                    .nodes
-                    .values()
-                    .map(|node| (node.id, node.name.clone()))
-                    .collect();
-                if nodes.is_empty() {
+                if hierarchy_nodes.is_empty() {
                     ui.label("No nodes yet");
                 }
-                for (node_id, name) in nodes {
-                    let selected = self.selected_node == Some(node_id);
-                    if ui
-                        .selectable_label(selected, format!("{}  #{}", name, node_id.get()))
-                        .clicked()
-                    {
-                        if self.selected_node != Some(node_id) {
+                let mut ordered = hierarchy_nodes;
+                ordered.sort_by_key(|(_, _, _, order, _)| *order);
+                let roots: Vec<_> = ordered
+                    .iter()
+                    .filter(|(_, _, parent, _, _)| parent.is_none())
+                    .map(|(id, _, _, _, _)| *id)
+                    .collect();
+                for root in roots {
+                    if let Some(selected) = hierarchy_row(ui, &ordered, root, 0, self.selected_node) {
+                        if selected != self.selected_node {
                             self.selected_vertex = None;
                             self.vertex_drag = None;
                             self.viewport_camera = None;
                             self.middle_pan_active = false;
+                            self.status = None;
                         }
-                        self.selected_node = Some(node_id);
-                        self.status = None;
+                        self.selected_node = Some(selected);
                     }
                 }
             });
@@ -608,6 +749,25 @@ impl eframe::App for AnimoEditorApp {
                         )
                     })
             });
+        let draw_records = animo_render::textured_draw_records(self.session.document().model());
+        let mut textured_layers = Vec::new();
+        for record in draw_records {
+            let layer = self
+                .session
+                .document()
+                .model()
+                .meshes
+                .get(&record.mesh)
+                .and_then(|mesh| MeshPreview::from_mesh(mesh).ok().map(|preview| (mesh, preview)));
+            let Some((mesh, preview)) = layer else {
+                continue;
+            };
+            match self.texture_handle(context, record.texture) {
+                Ok(texture) => textured_layers.push((record, mesh.clone(), preview, texture)),
+                Err(error) => self.status = Some(error),
+            }
+        }
+        let scene_bounds = combined_bounds(&textured_layers);
 
         egui::SidePanel::right("inspector")
             .resizable(true)
@@ -630,6 +790,11 @@ impl eframe::App for AnimoEditorApp {
                         "Texture: {}",
                         texture.map_or_else(|| "None".into(), |id| id.get().to_string())
                     ));
+                    if let Some(node) = self.session.document().model().nodes.get(node_id) {
+                        ui.label(format!("Visible: {}", node.visible));
+                        ui.label(format!("Opacity: {:.2}", node.opacity));
+                        ui.label(format!("Draw order: {}", node.draw_order));
+                    }
                     if let Some((selected_mesh, vertex_index)) = self.selected_vertex
                         && Some(selected_mesh) == *mesh
                         && let Some((_, _, vertices)) = &selected_preview
@@ -674,17 +839,15 @@ impl eframe::App for AnimoEditorApp {
                 egui::StrokeKind::Inside,
             );
             let canvas = available.shrink(32.0);
-            if let Some((mesh_id, Ok(preview), vertices)) = &selected_preview {
-                if let Some(bounds) = preview.bounds {
-                    self.ensure_viewport_camera(*mesh_id, bounds);
-                    let (
-                        middle_pressed,
-                        middle_down,
-                        middle_released,
-                        pointer_delta,
-                        scroll,
-                        pointer,
-                    ) = ui.input(|input| {
+            if let Some(bounds) = scene_bounds {
+                let camera_mesh = selected_node_state
+                    .as_ref()
+                    .and_then(|(_, _, _, mesh, _)| *mesh)
+                    .or_else(|| textured_layers.first().map(|(record, _, _, _)| record.mesh))
+                    .expect("scene bounds require a mesh");
+                self.ensure_viewport_camera(camera_mesh, bounds);
+                let (middle_pressed, middle_down, middle_released, pointer_delta, scroll, pointer) =
+                    ui.input(|input| {
                         (
                             input.pointer.button_pressed(egui::PointerButton::Middle),
                             input.pointer.button_down(egui::PointerButton::Middle),
@@ -694,33 +857,35 @@ impl eframe::App for AnimoEditorApp {
                             input.pointer.interact_pos(),
                         )
                     });
-                    if response.hovered() && middle_pressed && self.vertex_drag.is_none() {
-                        self.middle_pan_active = true;
-                    }
-                    if self.middle_pan_active {
-                        if middle_down
-                            && response.hovered()
-                            && let Some(camera) = &mut self.viewport_camera
-                        {
-                            camera.pan_by(pointer_delta);
-                        }
-                        if middle_released || !middle_down {
-                            self.middle_pan_active = false;
-                        }
-                    }
-                    if response.hovered()
-                        && !self.middle_pan_active
-                        && self.vertex_drag.is_none()
-                        && scroll.y != 0.0
-                        && let Some(pointer) = pointer
+                if response.hovered() && middle_pressed && self.vertex_drag.is_none() {
+                    self.middle_pan_active = true;
+                }
+                if self.middle_pan_active {
+                    if middle_down
+                        && response.hovered()
                         && let Some(camera) = &mut self.viewport_camera
                     {
-                        camera.zoom_at(canvas, pointer, (scroll.y * 0.002).exp());
+                        camera.pan_by(pointer_delta);
                     }
-                    let transform = self
-                        .viewport_camera
-                        .expect("camera initialized for selected mesh")
-                        .transform(canvas);
+                    if middle_released || !middle_down {
+                        self.middle_pan_active = false;
+                    }
+                }
+                if response.hovered()
+                    && !self.middle_pan_active
+                    && self.vertex_drag.is_none()
+                    && scroll.y != 0.0
+                    && let Some(pointer) = pointer
+                    && let Some(camera) = &mut self.viewport_camera
+                {
+                    camera.zoom_at(canvas, pointer, (scroll.y * 0.002).exp());
+                }
+                let transform = self
+                    .viewport_camera
+                    .expect("camera initialized for visible scene")
+                    .transform(canvas);
+
+                if let Some((mesh_id, Ok(_), vertices)) = &selected_preview {
                     let press_position = response
                         .drag_started()
                         .then(|| {
@@ -756,44 +921,41 @@ impl eframe::App for AnimoEditorApp {
                     if response.drag_stopped() {
                         finished_drag = self.vertex_drag.take();
                     }
+                }
 
-                    let transient_drag = self.vertex_drag.filter(|drag| drag.mesh == *mesh_id);
-                    for triangle in &preview.triangles {
-                        let mut points = triangle.vertices.map(|point| {
-                            transform.to_screen(Vec2 {
-                                x: point.x,
-                                y: point.y,
+                for (record, mesh, _, texture) in &textured_layers {
+                    let mut egui_mesh = egui::Mesh::with_texture(texture.id());
+                    for (vertex_index, vertex) in mesh.vertices.iter().enumerate() {
+                        let position = self
+                            .vertex_drag
+                            .filter(|drag| {
+                                drag.mesh == record.mesh && drag.vertex_index == vertex_index
                             })
+                            .map_or(vertex.position, |drag| drag.position);
+                        let mut color = Color32::WHITE;
+                        color.a = (f32::from(color.a()) * record.opacity).round() as u8;
+                        egui_mesh.vertices.push(egui::epaint::Vertex {
+                            pos: transform.to_screen(position),
+                            uv: egui::pos2(vertex.uv.x, vertex.uv.y),
+                            color,
                         });
-                        if let Some(drag) = transient_drag {
-                            for (point, vertex_index) in
-                                points.iter_mut().zip(triangle.indices.iter())
-                            {
-                                if *vertex_index as usize == drag.vertex_index {
-                                    *point = transform.to_screen(drag.position);
-                                }
-                            }
-                        }
-                        painter.add(egui::Shape::convex_polygon(
-                            points.to_vec(),
-                            Color32::from_rgba_unmultiplied(84, 145, 205, 120),
-                            Stroke::new(2.0_f32, Color32::from_rgb(135, 190, 245)),
-                        ));
                     }
+                    egui_mesh.indices.extend_from_slice(&mesh.indices);
+                    painter.add(egui::Shape::mesh(egui_mesh));
+                }
+
+                if let Some((mesh_id, Ok(_), vertices)) = &selected_preview {
                     for (vertex_index, position) in vertices.iter().enumerate() {
-                        let position = transient_drag
-                            .filter(|drag| drag.vertex_index == vertex_index)
+                        let position = self
+                            .vertex_drag
+                            .filter(|drag| drag.mesh == *mesh_id && drag.vertex_index == vertex_index)
                             .map_or(*position, |drag| drag.position);
                         let screen = transform.to_screen(position);
                         let selected = self.selected_vertex == Some((*mesh_id, vertex_index));
                         painter.circle_filled(
                             screen,
                             if selected { 6.0 } else { 4.0 },
-                            if selected {
-                                Color32::YELLOW
-                            } else {
-                                Color32::WHITE
-                            },
+                            if selected { Color32::YELLOW } else { Color32::WHITE },
                         );
                         painter.circle_stroke(
                             screen,
@@ -802,34 +964,11 @@ impl eframe::App for AnimoEditorApp {
                         );
                     }
                 }
-            } else if let Some((_, Ok(_), _)) = &selected_preview {
+            } else if textured_layers.is_empty() {
                 painter.text(
                     available.center(),
                     Align2::CENTER_CENTER,
-                    "Selected mesh has no triangles",
-                    FontId::proportional(16.0),
-                    Color32::LIGHT_GRAY,
-                );
-            } else if let Some((_, Err(error), _)) = &selected_preview {
-                painter.text(
-                    available.center(),
-                    Align2::CENTER_CENTER,
-                    error.to_string(),
-                    FontId::proportional(16.0),
-                    Color32::LIGHT_RED,
-                );
-            } else {
-                painter.text(
-                    available.center() - egui::vec2(0.0, 14.0),
-                    Align2::CENTER_CENTER,
-                    "Viewport",
-                    FontId::proportional(24.0),
-                    Color32::WHITE,
-                );
-                painter.text(
-                    available.center() + egui::vec2(0.0, 14.0),
-                    Align2::CENTER_CENTER,
-                    "Select a node with a mesh to preview it",
+                    "Import a layered PSD or add a node mesh",
                     FontId::proportional(16.0),
                     Color32::LIGHT_GRAY,
                 );

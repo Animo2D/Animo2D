@@ -228,24 +228,66 @@ mod tests {
         let second_texture = TextureId::new(9);
         for (node_id, name, parent, visible, opacity, draw_order, mesh, texture) in [
             (group_id, "visible group", None, true, 0.5, 0, None, None),
-            (hidden_group_id, "hidden group", None, false, 1.0, 1, None, None),
-            (first_id, "first", Some(group_id), true, 0.5, 8, Some(first_mesh), Some(first_texture)),
-            (second_id, "second", Some(hidden_group_id), true, 1.0, -2, Some(second_mesh), Some(second_texture)),
+            (
+                hidden_group_id,
+                "hidden group",
+                None,
+                false,
+                1.0,
+                1,
+                None,
+                None,
+            ),
+            (
+                first_id,
+                "first",
+                Some(group_id),
+                true,
+                0.5,
+                8,
+                Some(first_mesh),
+                Some(first_texture),
+            ),
+            (
+                second_id,
+                "second",
+                Some(hidden_group_id),
+                true,
+                1.0,
+                -2,
+                Some(second_mesh),
+                Some(second_texture),
+            ),
         ] {
-            model.nodes.insert(node_id, Node {
-                id: node_id,
-                name: name.into(),
-                parent,
-                part: None,
-                mesh,
-                texture,
-                visible,
-                opacity,
-                draw_order,
-            });
+            model.nodes.insert(
+                node_id,
+                Node {
+                    id: node_id,
+                    name: name.into(),
+                    parent,
+                    part: None,
+                    mesh,
+                    texture,
+                    visible,
+                    opacity,
+                    draw_order,
+                },
+            );
         }
-        model.textures.insert(first_texture, TextureRef { id: first_texture, path: "first.png".into() });
-        model.textures.insert(second_texture, TextureRef { id: second_texture, path: "second.png".into() });
+        model.textures.insert(
+            first_texture,
+            TextureRef {
+                id: first_texture,
+                path: "first.png".into(),
+            },
+        );
+        model.textures.insert(
+            second_texture,
+            TextureRef {
+                id: second_texture,
+                path: "second.png".into(),
+            },
+        );
         let records = textured_draw_records(&model);
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].node, first_id);
