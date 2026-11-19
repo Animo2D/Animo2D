@@ -37,6 +37,12 @@ pub struct ImportResult {
     pub warnings: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoadedProject {
+    pub model: Model,
+    pub assets: Vec<ImportedAsset>,
+}
+
 #[derive(Debug)]
 pub enum FormatError {
     Io(std::io::Error),
@@ -425,8 +431,97 @@ pub fn load_model(path: impl AsRef<Path>) -> Result<Model, FormatError> {
     decode(&bytes)
 }
 
-pub fn save_document(path: impl AsRef<Path>, document: &Document) -> Result<(), FormatError> {
-    save_model(path, document.model())
+pub fn load_project(path: impl AsRef<Path>) -> Result<LoadedProject, FormatError> {
+    let path = path.as_ref();
+    let model = load_model(path)?;
+    let root = path.parent().unwrap_or_else(|| Path::new("."));
+    let assets = load_assets(&model, root)?;
+    Ok(LoadedProject { model, assets })
+}
+
+pub fn load_assets(model: &Model, root: impl AsRef<Path>) -> Result<Vec<ImportedAsset>, FormatError> {
+    model.validate().map_err(FormatError::InvalidModel)?;
+    let root = root.as_ref();
+    let mut assets = Vec::new();
+    for texture in model.textures.values() {
+        let relative = safe_asset_path(&texture.path)?;
+        let path = root.join(&relative);
+        let bytes = fs::read(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                FormatError::MissingAsset(path.clone())
+            } else {
+                FormatError::Io(error)
+            }
+        })?;
+        assets.push(ImportedAsset {
+            path: relative,
+            bytes,
+        });
+    }
+    Ok(assets)
+}
+
+pub fn save_project(
+    path: impl AsRef<Path>,
+    model: &Model,
+    assets: &[ImportedAsset],
+    source_root: Option<&Path>,
+) -> Result<(), FormatError> {
+    model.validate().map_err(FormatError::InvalidModel)?;
+    let path = path.as_ref();
+    let root = path.parent().unwrap_or_else(|| Path::new("."));
+    let bytes = encode(model)?;
+    let in_memory: HashMap<_, _> = assets.iter().map(|asset| (asset.path.as_path(), asset)).collect();
+    let mut staged = Vec::new();
+    for texture in model.textures.values() {
+        let relative = safe_asset_path(&texture.path)?;
+        let destination = root.join(&relative);
+        let data = if let Some(asset) = in_memory.get(relative.as_path()) {
+            asset.bytes.clone()
+        } else if destination.is_file() {
+            continue;
+        } else if let Some(source_root) = source_root {
+            fs::read(source_root.join(&relative)).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    FormatError::MissingAsset(source_root.join(&relative))
+                } else {
+                    FormatError::Io(error)
+                }
+            })?
+        } else {
+            return Err(FormatError::MissingAsset(destination));
+        };
+        staged.push((destination, data));
+    }
+    for (destination, data) in staged {
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(destination, data)?;
+    }
+    fs::write(path, bytes)?;
+    Ok(())
+}
+
+pub fn save_document(
+    path: impl AsRef<Path>,
+    document: &Document,
+    assets: &[ImportedAsset],
+    source_root: Option<&Path>,
+) -> Result<(), FormatError> {
+    save_project(path, document.model(), assets, source_root)
+}
+
+fn safe_asset_path(path: &str) -> Result<PathBuf, FormatError> {
+    let path = Path::new(path);
+    if path.as_os_str().is_empty()
+        || path.components().any(|component| {
+            !matches!(component, Component::Normal(_) | Component::CurDir)
+        })
+    {
+        return Err(FormatError::InvalidAssetPath(path.to_path_buf()));
+    }
+    Ok(path.to_path_buf())
 }
 
 #[cfg(test)]

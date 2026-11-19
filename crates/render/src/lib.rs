@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use animo_core::Mesh;
+use animo_core::{Mesh, MeshId, Model, NodeId, TextureId};
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -25,6 +25,15 @@ pub struct PreviewBounds {
 pub struct MeshPreview {
     pub triangles: Vec<PreviewTriangle>,
     pub bounds: Option<PreviewBounds>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TexturedDrawRecord {
+    pub node: NodeId,
+    pub mesh: MeshId,
+    pub texture: TextureId,
+    pub opacity: f32,
+    pub draw_order: i32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,6 +61,46 @@ impl fmt::Display for RenderError {
 }
 
 impl std::error::Error for RenderError {}
+
+pub fn textured_draw_records(model: &Model) -> Vec<TexturedDrawRecord> {
+    let mut records = Vec::new();
+    for node in model.nodes.values() {
+        let (Some(mesh), Some(texture)) = (node.mesh, node.texture) else {
+            continue;
+        };
+        let mut visible = true;
+        let mut opacity = 1.0_f32;
+        let mut current = Some(node.id);
+        let mut ancestors = Vec::new();
+        while let Some(node_id) = current {
+            let Some(ancestor) = model.nodes.get(&node_id) else {
+                visible = false;
+                break;
+            };
+            ancestors.push(ancestor);
+            current = ancestor.parent;
+            if ancestors.len() > model.nodes.len() {
+                visible = false;
+                break;
+            }
+        }
+        for ancestor in ancestors {
+            visible &= ancestor.visible;
+            opacity *= ancestor.opacity;
+        }
+        if visible && opacity > 0.0 {
+            records.push(TexturedDrawRecord {
+                node: node.id,
+                mesh,
+                texture,
+                opacity,
+                draw_order: node.draw_order,
+            });
+        }
+    }
+    records.sort_by_key(|record| (record.draw_order, record.node.get()));
+    records
+}
 
 impl MeshPreview {
     pub fn from_mesh(mesh: &Mesh) -> Result<Self, RenderError> {
