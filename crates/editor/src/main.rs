@@ -1,8 +1,10 @@
 #![forbid(unsafe_code)]
 
 use animo_core::{
-    EditCommand, EditTransaction, Mesh, MeshId, Model, ModelId, Node, NodeId, Vec2, Vertex,
+    EditCommand, EditTransaction, Mesh, MeshId, Model, ModelId, Node, NodeId, TextureId, Vec2,
+    Vertex,
 };
+use animo_format::{ImportedAsset, ImportResult, LoadedProject};
 use animo_editor::EditorSession;
 use animo_render::MeshPreview;
 use eframe::egui::{self, Align, Align2, Color32, FontId, Layout, Pos2, Rect, RichText, Stroke};
@@ -117,8 +119,15 @@ enum PendingAction {
     Open,
 }
 
+struct AssetCache {
+    assets: Vec<ImportedAsset>,
+    source_root: Option<PathBuf>,
+    textures: HashMap<TextureId, egui::TextureHandle>,
+}
+
 struct AnimoEditorApp {
     session: EditorSession,
+    asset_cache: AssetCache,
     selected_node: Option<NodeId>,
     selected_vertex: Option<(MeshId, usize)>,
     vertex_drag: Option<VertexDrag>,
@@ -136,6 +145,11 @@ impl AnimoEditorApp {
         let model = Model::new(ModelId::new(1), "Untitled Model");
         Self {
             session: EditorSession::new(model.clone()).expect("the initial model is valid"),
+            asset_cache: AssetCache {
+                assets: Vec::new(),
+                source_root: None,
+                textures: HashMap::new(),
+            },
             selected_node: None,
             selected_vertex: None,
             vertex_drag: None,
@@ -155,6 +169,11 @@ impl AnimoEditorApp {
 
     fn reset_session(&mut self, model: Model, path: Option<PathBuf>) {
         self.session = EditorSession::new(model.clone()).expect("loaded or new model is valid");
+        self.asset_cache = AssetCache {
+            assets: Vec::new(),
+            source_root: None,
+            textures: HashMap::new(),
+        };
         self.selected_node = None;
         self.selected_vertex = None;
         self.vertex_drag = None;
@@ -191,10 +210,15 @@ impl AnimoEditorApp {
         let Some(path) = path else {
             return;
         };
-        match animo_format::load_model(&path) {
-            Ok(model) => match EditorSession::new(model.clone()) {
+        match animo_format::load_project(&path) {
+            Ok(project) => match EditorSession::new(project.model.clone()) {
                 Ok(session) => {
                     self.session = session;
+                    self.asset_cache = AssetCache {
+                        assets: project.assets,
+                        source_root: path.parent().map(Path::to_path_buf),
+                        textures: HashMap::new(),
+                    };
                     self.selected_node = None;
                     self.selected_vertex = None;
                     self.vertex_drag = None;
@@ -202,12 +226,56 @@ impl AnimoEditorApp {
                     self.middle_pan_active = false;
                     self.next_node_number = 1;
                     self.current_path = Some(path);
-                    self.saved_model = model;
+                    self.saved_model = project.model;
                     self.pending_action = None;
                     self.status = None;
                 }
                 Err(error) => self.status = Some(error.to_string()),
             },
+            Err(error) => self.status = Some(error.to_string()),
+        }
+    }
+
+    fn import_psd_dialog(&mut self) {
+        let path = rfd::FileDialog::new()
+            .add_filter("Photoshop document", &["psd"])
+            .pick_file();
+        let Some(path) = path else {
+            return;
+        };
+        match animo_format::import_psd(&path) {
+            Ok(imported) => self.install_import(imported),
+            Err(error) => self.status = Some(error.to_string()),
+        }
+    }
+
+    fn install_import(&mut self, imported: ImportResult) {
+        match EditorSession::new(imported.model.clone()) {
+            Ok(session) => {
+                self.session = session;
+                self.asset_cache = AssetCache {
+                    assets: imported.assets,
+                    source_root: None,
+                    textures: HashMap::new(),
+                };
+                self.selected_node = None;
+                self.selected_vertex = None;
+                self.vertex_drag = None;
+                self.viewport_camera = None;
+                self.middle_pan_active = false;
+                self.next_node_number = 1;
+                self.current_path = None;
+                self.saved_model = Model::new(ModelId::new(0), "Unsaved import");
+                self.pending_action = None;
+                self.status = if imported.warnings.is_empty() {
+                    Some("PSD imported; save the model to keep its assets".into())
+                } else {
+                    Some(format!(
+                        "PSD imported with {} warnings; save to keep its assets",
+                        imported.warnings.len()
+                    ))
+                };
+            }
             Err(error) => self.status = Some(error.to_string()),
         }
     }

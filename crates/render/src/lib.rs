@@ -215,6 +215,44 @@ mod tests {
     }
 
     #[test]
+    fn textured_draw_records_inherit_visibility_opacity_and_order() {
+        use animo_core::{Model, ModelId, Node, TextureId, TextureRef};
+        let mut model = Model::new(ModelId::new(1), "render test");
+        let group_id = NodeId::new(2);
+        let hidden_group_id = NodeId::new(3);
+        let first_id = NodeId::new(4);
+        let second_id = NodeId::new(5);
+        let first_mesh = MeshId::new(6);
+        let second_mesh = MeshId::new(7);
+        let first_texture = TextureId::new(8);
+        let second_texture = TextureId::new(9);
+        for (node_id, name, parent, visible, opacity, draw_order, mesh, texture) in [
+            (group_id, "visible group", None, true, 0.5, 0, None, None),
+            (hidden_group_id, "hidden group", None, false, 1.0, 1, None, None),
+            (first_id, "first", Some(group_id), true, 0.5, 8, Some(first_mesh), Some(first_texture)),
+            (second_id, "second", Some(hidden_group_id), true, 1.0, -2, Some(second_mesh), Some(second_texture)),
+        ] {
+            model.nodes.insert(node_id, Node {
+                id: node_id,
+                name: name.into(),
+                parent,
+                part: None,
+                mesh,
+                texture,
+                visible,
+                opacity,
+                draw_order,
+            });
+        }
+        model.textures.insert(first_texture, TextureRef { id: first_texture, path: "first.png".into() });
+        model.textures.insert(second_texture, TextureRef { id: second_texture, path: "second.png".into() });
+        let records = textured_draw_records(&model);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].node, first_id);
+        assert_eq!(records[0].opacity, 0.25);
+    }
+
+    #[test]
     fn empty_mesh_has_no_bounds_or_triangles() {
         let mesh = Mesh {
             id: MeshId::new(1),
