@@ -12,4 +12,4 @@
 - ~~Mesh vertex addition, position/UV editing, and node mesh assignment~~
 - ~~Triangle mesh creation and viewport preview~~
 
-`editor` provides a native `eframe/egui` shell over the shared Core edit API. Run it with `cargo run -p animo-editor`, add a node, then use **Add triangle mesh** in the Inspector to preview its mesh. The viewport currently supports static triangle previews; PSD import, vertex selection, and animation controls are not implemented yet. `rigging`, `physics`, `ai`, and `script` remain buildable placeholders for later implementation.
+`editor` provides a native `eframe/egui` shell over the shared Core edit API. Run it with `cargo run -p animo-editor`. Use **File > New/Open/Save/Save As** to manage `.animo2d` JSON models; unsaved edits prompt before New/Open. Add a node, then use **Add triangle mesh** in the Inspector to preview it. The viewport currently supports static triangle previews; PSD import, vertex selection, and animation controls are not implemented yet. `rigging`, `physics`, `ai`, and `script` remain buildable placeholders for later implementation.

@@ -6,5 +6,7 @@ license.workspace = true
 
 [dependencies]
 animo-core = { path = "../core" }
+animo-format = { path = "../format" }
 animo-render = { path = "../render" }
 eframe.workspace = true
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }

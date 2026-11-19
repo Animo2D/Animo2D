@@ -54,7 +54,7 @@ impl std::error::Error for RenderError {}
 
 impl MeshPreview {
     pub fn from_mesh(mesh: &Mesh) -> Result<Self, RenderError> {
-        if mesh.indices.len() % 3 != 0 {
+        if !mesh.indices.len().is_multiple_of(3) {
             return Err(RenderError::InvalidTriangleIndexCount(mesh.indices.len()));
         }
         let mut min = PreviewPoint {
